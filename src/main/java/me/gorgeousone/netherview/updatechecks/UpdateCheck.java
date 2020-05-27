@@ -39,7 +39,7 @@ public class UpdateCheck {
 		Bukkit.getScheduler().runTaskAsynchronously(javaPlugin, () -> {
 			
 			try {
-				InputStream inputStream = new URL("https://api.spigotmc.org/legacy/update.php?resource=" + resourceId).openStream();
+				InputStream inputStream = new URL("https://api.spigotmc.org/legacy/update.php?resource=" + resourceId + "/").openStream();
 				Scanner scanner = new Scanner(inputStream);
 				
 				if (!scanner.hasNext()) {

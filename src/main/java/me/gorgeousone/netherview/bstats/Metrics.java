@@ -731,5 +731,4 @@ public class Metrics {
 			return data;
 		}
 	}
-	
 }

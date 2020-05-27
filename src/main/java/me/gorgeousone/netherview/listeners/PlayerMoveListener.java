@@ -48,8 +48,9 @@ public class PlayerMoveListener implements Listener {
 		Location to = event.getTo();
 		
 		if (!from.toVector().equals(to.toVector())) {
+			
 			Vector movement = to.clone().subtract(from).toVector();
-			viewingHandler.displayNearestPortalTo(player, player.getEyeLocation().add(movement));
+			viewingHandler.displayNearestPortalTo(player, movement);
 		}
 	}
 	
@@ -58,20 +59,23 @@ public class PlayerMoveListener implements Listener {
 		
 		Player player = event.getPlayer();
 		
-		if (player.getGameMode() == GameMode.SPECTATOR) {
+		if (!player.hasPermission(NetherView.VIEW_PERM) || player.getGameMode() == GameMode.SPECTATOR) {
+			
+			if (viewingHandler.hasViewSession(player)) {
+				viewingHandler.hideViewSession(player);
+			}
+			
 			return;
 		}
 		
-		World.Environment worldType = player.getWorld().getEnvironment();
+		Vector sneakMovement = new Vector(0, 0.2, 0).multiply(event.isSneaking() ? -1 : 1);
 		
-		if (worldType == World.Environment.NORMAL || worldType == World.Environment.NETHER) {
-			new BukkitRunnable() {
-				@Override
-				public void run() {
-					viewingHandler.displayNearestPortalTo(player, player.getEyeLocation());
-				}
-			}.runTaskLater(main, 2);
-		}
+		new BukkitRunnable() {
+			@Override
+			public void run() {
+				viewingHandler.displayNearestPortalTo(player, sneakMovement);
+			}
+		}.runTaskLater(main, 2);
 	}
 	
 	@EventHandler

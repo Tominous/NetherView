@@ -253,7 +253,7 @@ public class PortalHandler {
 		}
 	}
 	
-	public void updateExpirationTime(Portal portal) {
+	public void updatePortalDataExpirationTime(Portal portal) {
 		recentlyViewedPortals.put(portal, System.currentTimeMillis());
 	}
 	

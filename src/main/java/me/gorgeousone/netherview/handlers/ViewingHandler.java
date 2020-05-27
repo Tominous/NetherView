@@ -58,13 +58,6 @@ public class ViewingHandler {
 	}
 	
 	/**
-	 * Returns the one projection cache a player is currently able to see in a portal animation.
-	 */
-	public ProjectionCache getViewedCache(Player player) {
-		return viewedProjections.get(player.getUniqueId());
-	}
-	
-	/**
 	 * Returns a Map of BlockTypes linked to their location that are currently displayed with fake blocks
 	 * to a player.
 	 */
@@ -97,10 +90,12 @@ public class ViewingHandler {
 	}
 	
 	/**
-	 * Locates the nearest portal to a player and displays a portal animation to them with fake blocks (if in view range).
+	 * Locates the nearest portal to a player and displays a portal animation to them with fake blocks (if portal in view range).
+	 * @param playerMovement current movement of the player used for improving consistency of portal animation
 	 */
-	public void displayNearestPortalTo(Player player, Location playerEyeLoc) {
+	public void displayNearestPortalTo(Player player, Vector playerMovement) {
 		
+		Location playerEyeLoc = player.getEyeLocation().add(playerMovement);
 		Portal portal = portalHandler.getNearestPortal(playerEyeLoc, true);
 		
 		if (portal == null) {
@@ -121,11 +116,11 @@ public class ViewingHandler {
 		
 		//display the portal totally normal if the player is not standing next to or in the portal
 		if (getDistanceToPortal(playerEyeLoc, portalRect) > 0.5) {
-			displayPortalTo(player, playerEyeLoc, portal, true, main.hidePortalBlocks());
+			displayPortalTo(player, playerEyeLoc, playerMovement, portal, true, main.hidePortalBlocks());
 			
 			//keep portal blocks hidden (if requested) if the player is standing next to the portal to avoid light flickering
 		} else if (!portalRect.contains(playerEyeLoc.toVector())) {
-			displayPortalTo(player, playerEyeLoc, portal, false, main.hidePortalBlocks());
+			displayPortalTo(player, playerEyeLoc, playerMovement, portal, false, main.hidePortalBlocks());
 			
 			//if the player is standing inside the portal projection should be dropped
 		} else {
@@ -149,6 +144,7 @@ public class ViewingHandler {
 	
 	public void displayPortalTo(Player player,
 	                            Location playerEyeLoc,
+	                            Vector playerMovement,
 	                            Portal portal,
 	                            boolean displayFrustum,
 	                            boolean hidePortalBlocks) {
@@ -160,16 +156,14 @@ public class ViewingHandler {
 		if (!portal.projectionsAreLoaded()) {
 			portalHandler.loadProjectionCachesOf(portal);
 		} else {
-			portalHandler.updateExpirationTime(portal);
+			portalHandler.updatePortalDataExpirationTime(portal);
 		}
 		
 		ProjectionCache projection = ViewingFrustumFactory.isPlayerBehindPortal(player, portal) ? portal.getFrontProjection() : portal.getBackProjection();
-		ViewingFrustum playerFrustum = ViewingFrustumFactory.createFrustum(playerEyeLoc.toVector(), portal.getPortalRect(), projection.getCacheLength());
+		ViewingFrustum playerFrustum = ViewingFrustumFactory.createFrustum(playerEyeLoc.toVector(), playerMovement, portal.getPortalRect(), projection.getCacheLength());
 		
 		viewedPortals.put(player.getUniqueId(), portal);
 		viewedProjections.put(player.getUniqueId(), projection);
-		
-		//TODO refresh portal time stamp
 		
 		Map<BlockVec, BlockType> visibleBlocks = new HashMap<>();
 		
@@ -185,13 +179,15 @@ public class ViewingHandler {
 		displayBlocks(player, visibleBlocks);
 	}
 	
-	private Map<BlockVec, BlockType> getBlocksInFrustum(ProjectionCache projection, ViewingFrustum frustum) {
+	private Map<BlockVec, BlockType> getBlocksInFrustum(ProjectionCache projection, ViewingFrustum playerFrustum) {
 		
 		BlockVec min = projection.getMin();
 		BlockVec max = projection.getMax();
 		
-		AxisAlignedRect nearPlaneRect = frustum.getNearPlaneRect();
-		AxisAlignedRect farPlaneRect = frustum.getFarPlaneRect();
+		//reduce the iterated area of the block cache to what the frustum can actually reach
+		//TODO put that in a new method
+		AxisAlignedRect nearPlaneRect = playerFrustum.getNearPlaneRect();
+		AxisAlignedRect farPlaneRect = playerFrustum.getFarPlaneRect();
 		
 		if (farPlaneRect.getAxis() == Axis.X) {
 			
@@ -226,7 +222,7 @@ public class ViewingHandler {
 					
 					BlockVec blockPos = new BlockVec(x, y, z);
 					
-					if (frustum.contains(blockPos.toVector())) {
+					if (playerFrustum.contains(blockPos.toVector())) {
 						blocksInFrustum.putAll(projection.getBlockTypesAround(new BlockVec(x, y, z)));
 					}
 				}
@@ -237,64 +233,89 @@ public class ViewingHandler {
 	}
 	
 	/**
-	 * Forwards the changes made in a block cache to all the linked projection caches. This also live-updates what the players see
+	 * Forwards the changes from a block cache to all the linked projection caches. This also live-updates what the players see
 	 */
 	public void updateProjections(BlockCache cache, Map<BlockVec, BlockType> updatedCopies) {
 		
-		for (ProjectionCache projection : portalHandler.getProjectionsLinkedTo(cache)) {
+		for (ProjectionCache linkedProjection : portalHandler.getProjectionsLinkedTo(cache)) {
 			
-			Map<BlockVec, BlockType> projectionUpdates = new HashMap<>();
+			Map<BlockVec, BlockType> projectionUpdates = updateBlocksInProjection(linkedProjection, updatedCopies);
 			
-			for (Map.Entry<BlockVec, BlockType> entry : updatedCopies.entrySet()) {
+			//TODO stop iterating through all players for each projection?
+			for (Map.Entry<UUID, ProjectionCache> viewedProjection : viewedProjections.entrySet()) {
 				
-				Transform blockTransform = projection.getTransform();
-				BlockVec projectionBlockPos = blockTransform.transformVec(entry.getKey().clone());
-				BlockType projectionBlockType = entry.getValue().clone().rotate(blockTransform.getQuarterTurns());
-				
-				projection.setBlockTypeAt(projectionBlockPos, projectionBlockType);
-				projectionUpdates.put(projectionBlockPos, projectionBlockType);
-			}
-			
-			//TODO stop iterating same players for each projection?
-			for (UUID playerID : viewedProjections.keySet()) {
-				
-				if (viewedProjections.get(playerID) != projection) {
+				if (viewedProjection.getValue() != linkedProjection) {
 					continue;
 				}
 				
-				Portal portal = viewedPortals.get(playerID);
+				UUID playerID = viewedProjection.getKey();
 				Player player = Bukkit.getPlayer(playerID);
+				Portal portal = viewedPortals.get(playerID);
 				
 				ViewingFrustum playerFrustum = ViewingFrustumFactory.createFrustum(
 						player.getEyeLocation().toVector(),
+						new Vector(),
 						portal.getPortalRect(),
-						projection.getCacheLength());
+						linkedProjection.getCacheLength());
 				
 				if (playerFrustum == null) {
 					continue;
 				}
 				
-				Map<BlockVec, BlockType> blocksInFrustum = new HashMap<>();
-				Map<BlockVec, BlockType> viewSession = getViewSession(player);
-				
-				for (Map.Entry<BlockVec, BlockType> entry : projectionUpdates.entrySet()) {
-					
-					BlockVec blockPos = entry.getKey();
-					BlockType blockType = entry.getValue();
-					
-					if (blockType == null) {
-						blockType = BlockType.of(blockPos.toBlock(player.getWorld()));
-					}
-					
-					if (playerFrustum.containsBlock(blockPos.toVector())) {
-						blocksInFrustum.put(blockPos, blockType);
-						viewSession.put(blockPos, blockType);
-					}
-				}
-				
-				DisplayUtils.displayFakeBlocks(player, blocksInFrustum);
+				Map<BlockVec, BlockType> blockChangesInFrustum = updateBlocksInFrustum(player, projectionUpdates, playerFrustum);
+				DisplayUtils.displayFakeBlocks(player, blockChangesInFrustum);
 			}
 		}
+	}
+	
+	/**
+	 * Transfers block changes from a block cache into a connected projection cache.
+	 * @param projection the projection cache to be updated
+	 * @param changedBlocks info about blocks types changed in the block cache
+	 * @return a map with the blocks changed types in the projection
+	 */
+	private Map<BlockVec, BlockType> updateBlocksInProjection(ProjectionCache projection, Map<BlockVec, BlockType> changedBlocks) {
+		
+		Map<BlockVec, BlockType> projectionUpdates = new HashMap<>();
+		
+		for (Map.Entry<BlockVec, BlockType> updatedCopy : changedBlocks.entrySet()) {
+			
+			Transform blockTransform = projection.getTransform();
+			BlockVec projectionBlockPos = blockTransform.transformVec(updatedCopy.getKey().clone());
+			BlockType projectionBlockType = updatedCopy.getValue().clone().rotate(blockTransform.getQuarterTurns());
+			
+			projection.setBlockTypeAt(projectionBlockPos, projectionBlockType);
+			projectionUpdates.put(projectionBlockPos, projectionBlockType);
+		}
+		
+		return projectionUpdates;
+	}
+	
+	/**
+	 * Forwards block changes from a projection cache to the actual view session of a player, but only the ones that are actually visible in the player's visible frustum.
+	 * @return all blocks that are confirmed to be visible to the player and need to be sent as new fake blocks
+	 */
+	private Map<BlockVec, BlockType> updateBlocksInFrustum(Player player, Map<BlockVec, BlockType> projectionUpdates, ViewingFrustum playerFrustum) {
+		
+		Map<BlockVec, BlockType> frustumUpdates = new HashMap<>();
+		Map<BlockVec, BlockType> viewSession = getViewSession(player);
+		
+		for (Map.Entry<BlockVec, BlockType> entry : projectionUpdates.entrySet()) {
+			
+			BlockVec blockPos = entry.getKey();
+			BlockType blockType = entry.getValue();
+			
+			if (blockType == null) {
+				blockType = BlockType.of(blockPos.toBlock(player.getWorld()));
+			}
+			
+			if (playerFrustum.containsBlock(blockPos.toVector())) {
+				frustumUpdates.put(blockPos, blockType);
+				viewSession.put(blockPos, blockType);
+			}
+		}
+		
+		return frustumUpdates;
 	}
 	
 	/**
@@ -332,22 +353,6 @@ public class ViewingHandler {
 		DisplayUtils.displayFakeBlocks(player, blocksToDisplay);
 	}
 
-//	private void displayFrustum(Player player, ViewingFrustum frustum) {
-//
-//		try {
-//			AxisAlignedRect nearPlane = frustum.getNearPlaneRect();
-//			AxisAlignedRect farPlane = frustum.getFarPlaneRect();
-//			World world = player.getWorld();
-//
-//			player.getWorld().spawnParticle(Particle.FLAME, nearPlane.getMin().toLocation(world), 0, 0, 0, 0);
-//			player.getWorld().spawnParticle(Particle.FLAME, nearPlane.getMax().toLocation(world), 0, 0, 0, 0);
-//
-//			player.getWorld().spawnParticle(Particle.FLAME, farPlane.getMin().toLocation(world), 0, 0, 0, 0);
-//			player.getWorld().spawnParticle(Particle.FLAME, farPlane.getMax().toLocation(world), 0, 0, 0, 0);
-//
-//		} catch (Exception ignored) {}
-//	}
-	
 	/**
 	 * Removes a portal and related portal animations.
 	 */
